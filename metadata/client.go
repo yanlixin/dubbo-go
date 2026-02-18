@@ -45,13 +45,27 @@ const defaultTimeout = "5s" // s
 func GetMetadataFromMetadataReport(revision string, instance registry.ServiceInstance) (*info.MetadataInfo, error) {
 	report := GetMetadataReport()
 	if report == nil {
+		logger.Warnf("[metadata-diag] GetMetadataFromMetadataReport: report is nil")
 		return nil, perrors.New("no metadata report instance found,please check ")
 	}
-	return report.GetAppMetadata(instance.GetServiceName(), revision)
+	app := instance.GetServiceName()
+	logger.Infof("[metadata-diag] GetMetadataFromMetadataReport: app=%s revision=%q", app, revision)
+	meta, err := report.GetAppMetadata(app, revision)
+	if err != nil {
+		logger.Warnf("[metadata-diag] GetMetadataFromMetadataReport GetAppMetadata failed: app=%s revision=%q err=%v", app, revision, err)
+		return nil, err
+	}
+	logger.Infof("[metadata-diag] GetMetadataFromMetadataReport ok: app=%s revision=%q", app, revision)
+	return meta, err
 }
 
 func GetMetadataFromRpc(revision string, instance registry.ServiceInstance) (*info.MetadataInfo, error) {
 	url := buildStandardMetadataServiceURL(instance)
+	if url == nil {
+		logger.Warnf("[metadata-diag] GetMetadataFromRpc: url is nil (instance %s lacks dubbo.metadata-service.url-params)", instance.GetHost())
+		return nil, perrors.New("metadata service URL is nil (instance may lack dubbo.metadata-service.url-params in Nacos)")
+	}
+	logger.Infof("[metadata-diag] GetMetadataFromRpc: connecting instance %s revision=%q", instance.GetHost(), revision)
 	url.SetParam(constant.TimeoutKey, defaultTimeout)
 	p := extension.GetProtocol(url.Protocol)
 	invoker := p.Refer(url)

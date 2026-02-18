@@ -32,6 +32,7 @@ import (
 )
 
 import (
+	"dubbo.apache.org/dubbo-go/v3/cluster/directory"
 	"dubbo.apache.org/dubbo-go/v3/common"
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
 	"dubbo.apache.org/dubbo-go/v3/common/extension"
@@ -59,6 +60,8 @@ var (
 type registryProtocol struct {
 	// Registry Map<RegistryAddress, Registry>
 	registries *sync.Map
+	// directoryCache: same (registry + interface) reuses one Directory to align with Java "one Reference one RegistryDirectory"
+	directoryCache *sync.Map
 	// To solve the problem of RMI repeated exposure port conflicts,
 	// the services that have been exposed are no longer exposed.
 	// providerurl <--> exporter
@@ -75,17 +78,39 @@ func init() {
 
 func newRegistryProtocol() *registryProtocol {
 	return &registryProtocol{
-		registries: &sync.Map{},
-		bounds:     &sync.Map{},
+		registries:     &sync.Map{},
+		directoryCache: &sync.Map{},
+		bounds:         &sync.Map{},
 	}
 }
 
-func (proto *registryProtocol) getRegistry(registryUrl *common.URL) registry.Registry {
+// getRegistryCacheKey returns the same key used by getRegistry for directory cache.
+func (proto *registryProtocol) getRegistryCacheKey(registryUrl *common.URL) string {
 	namespace := registryUrl.GetParam(constant.RegistryNamespaceKey, "")
 	cacheKey := registryUrl.PrimitiveURL
 	if namespace != "" {
 		cacheKey = cacheKey + "?" + constant.NacosNamespaceID + "=" + namespace
 	}
+	return cacheKey
+}
+
+// getDirectoryCacheRegistryKey returns a normalized key for directory cache so that
+// both "registry://" and "service-discovery-registry://" URLs for the same registry
+// (same host:port+namespace) share one Directory. Otherwise cache never hits.
+func (proto *registryProtocol) getDirectoryCacheRegistryKey(registryUrl *common.URL) string {
+	location := registryUrl.Location
+	if location == "" && registryUrl.Ip != "" {
+		location = registryUrl.Ip + ":" + registryUrl.Port
+	}
+	namespace := registryUrl.GetParam(constant.RegistryNamespaceKey, "")
+	if namespace != "" {
+		return location + "?" + constant.NacosNamespaceID + "=" + namespace
+	}
+	return location
+}
+
+func (proto *registryProtocol) getRegistry(registryUrl *common.URL) registry.Registry {
+	cacheKey := proto.getRegistryCacheKey(registryUrl)
 	actualReg, _ := proto.registries.LoadOrStore(cacheKey, func() any {
 		reg, err := extension.GetRegistry(registryUrl.Protocol, registryUrl)
 		if err != nil {
@@ -151,6 +176,26 @@ func (proto *registryProtocol) Refer(url *common.URL) base.Invoker {
 
 	reg := proto.getRegistry(url)
 
+	// Reuse Directory for same (registry + interface) so one interface has one Directory (align with Java).
+	// Use normalized registry key so "registry://" and "service-discovery-registry://" for same host:port+namespace share one Directory.
+	dirCacheKey := proto.getDirectoryCacheRegistryKey(registryUrl) + "#dir#" + serviceUrl.ServiceKey()
+	if v, ok := proto.directoryCache.Load(dirCacheKey); ok {
+		dic := v.(directory.Directory)
+		logger.Infof("[directory-cache] hit key=%s directory_ptr=%p interface=%s", dirCacheKey, dic, serviceUrl.GetParam(constant.InterfaceKey, serviceUrl.Path))
+		err := dic.Subscribe(registryUrl.SubURL)
+		if err != nil {
+			logger.Errorf("consumer service %v register registry %v error, error message is %s",
+				serviceUrl.String(), registryUrl.String(), err.Error())
+		}
+		clusterKey := serviceUrl.GetParam(constant.ClusterKey, constant.DefaultCluster)
+		cluster, err := extension.GetCluster(clusterKey)
+		if err != nil || cluster == nil {
+			logger.Errorf("consumer service %v get cluster %s error, will return nil invoker!", serviceUrl.String(), clusterKey)
+			return nil
+		}
+		return cluster.Join(dic)
+	}
+
 	// new registry directory for store service url from registry
 	dic, err := extension.GetDirectoryInstance(registryUrl, reg)
 	if err != nil {
@@ -158,6 +203,8 @@ func (proto *registryProtocol) Refer(url *common.URL) base.Invoker {
 			serviceUrl.String(), err.Error())
 		return nil
 	}
+	proto.directoryCache.Store(dirCacheKey, dic)
+	logger.Infof("[directory-cache] store key=%s directory_ptr=%p interface=%s", dirCacheKey, dic, serviceUrl.GetParam(constant.InterfaceKey, serviceUrl.Path))
 
 	// This will start a new routine and listen to instance changes.
 	err = dic.Subscribe(registryUrl.SubURL)

@@ -165,10 +165,13 @@ func (d *DefaultServiceInstance) GetTag() string {
 // ToURLs return a list of url.
 func (d *DefaultServiceInstance) ToURLs(service *info.ServiceInfo) []*common.URL {
 	urls := make([]*common.URL, 0, 8)
-	if d.endpoints == nil {
-		err := json.Unmarshal([]byte(d.Metadata[constant.ServiceInstanceEndpoints]), &d.endpoints)
-		if err != nil {
-			logger.Errorf("Error parsing endpoints of service instance v%, multiple protocol services might not be able to work properly, err is v%.", d, err)
+	if d.endpoints == nil && d.Metadata != nil {
+		raw := d.Metadata[constant.ServiceInstanceEndpoints]
+		if raw != "" {
+			err := json.Unmarshal([]byte(raw), &d.endpoints)
+			if err != nil {
+				logger.Errorf("Error parsing endpoints of service instance v%, multiple protocol services might not be able to work properly, err is v%.", d, err)
+			}
 		}
 	}
 
@@ -185,8 +188,27 @@ func (d *DefaultServiceInstance) ToURLs(service *info.ServiceInfo) []*common.URL
 			}
 		}
 	} else {
+		// Align with Dubbo Java: use port from metadata (ServiceInfo / exported URL) when present;
+		// otherwise fall back to instance port from registry (e.g. Nacos instance.port may be app HTTP port).
+		port := d.Port
+		portSource := "instance"
+		if service.Port > 0 {
+			port = service.Port
+			portSource = "serviceInfo.Port"
+		} else if service.URL != nil && service.URL.Port != "" {
+			if p, err := strconv.Atoi(service.URL.Port); err == nil {
+				port = p
+				portSource = "serviceInfo.URL.Port"
+			}
+		}
+		urlPortStr := ""
+		if service.URL != nil {
+			urlPortStr = service.URL.Port
+		}
+		logger.Infof("[port-diag] ToURLs: interface=%s instance_port=%d serviceInfo_port=%d url_port=%s chosen_port=%d source=%s",
+			service.Name, d.Port, service.Port, urlPortStr, port, portSource)
 		url := common.NewURLWithOptions(common.WithProtocol(service.Protocol),
-			common.WithIp(d.Host), common.WithPort(strconv.Itoa(d.Port)),
+			common.WithIp(d.Host), common.WithPort(strconv.Itoa(port)),
 			common.WithPath(service.Name), common.WithInterface(service.Name),
 			common.WithMethods(service.GetMethods()), common.WithParams(service.GetParams()),
 			common.WithParams(url2.Values{constant.Tagkey: {d.Tag}}),

@@ -130,6 +130,9 @@ func InitRegistryMetadataReport(registries map[string]*global.RegistryConfig) er
 }
 
 func fromRegistry(id string, rc *global.RegistryConfig) *ReportOptions {
+	// Align with Dubbo Java: when registry is used as metadata center, Java uses default metadata namespace "public"
+	// (see Nacos doc: "If the namespace is not specified, public is used as the default namespace"). Use "public"
+	// so consumer reads from the same namespace where Java provider writes metadata.
 	opts := NewReportOptions(
 		WithRegistryId(id),
 		WithProtocol(rc.Protocol),
@@ -137,7 +140,7 @@ func fromRegistry(id string, rc *global.RegistryConfig) *ReportOptions {
 		WithUsername(rc.Username),
 		WithPassword(rc.Password),
 		WithGroup(rc.Group),
-		WithNamespace(rc.Namespace),
+		WithNamespace("public"),
 		WithParams(rc.Params),
 	)
 	if rc.Timeout != "" {

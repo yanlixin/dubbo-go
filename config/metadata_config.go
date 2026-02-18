@@ -110,6 +110,8 @@ func (mc *MetadataReportConfig) toReportOptions() (*metadata.ReportOptions, erro
 }
 
 func registryToReportOptions(id string, rc *RegistryConfig) (*metadata.ReportOptions, error) {
+	// Align with Dubbo Java: when registry is used as metadata center, Java uses default metadata namespace "public".
+	// Use "public" so consumer reads from the same namespace where Java provider writes metadata.
 	opts := metadata.NewReportOptions(
 		metadata.WithRegistryId(id),
 		metadata.WithProtocol(rc.Protocol),
@@ -117,7 +119,7 @@ func registryToReportOptions(id string, rc *RegistryConfig) (*metadata.ReportOpt
 		metadata.WithUsername(rc.Username),
 		metadata.WithPassword(rc.Password),
 		metadata.WithGroup(rc.Group),
-		metadata.WithNamespace(rc.Namespace),
+		metadata.WithNamespace("public"),
 		metadata.WithParams(rc.Params),
 	)
 	if rc.Timeout != "" {
@@ -144,14 +146,20 @@ func (mc *MetadataReportConfig) Init(rc *RootConfig) error {
 		return opts.Init()
 	}
 	if len(rc.Registries) > 0 {
-		// if metadata report config is not available, then init metadata report instance with registries
+		// if metadata report config is not available, then init metadata report instance with registries.
+		// Align with Dubbo Java: when use-as-meta-report is empty, treat as true (use registry as metadata center). ParseBool("") would error otherwise.
 		for id, reg := range rc.Registries {
 			if isValid(reg.Address) {
-				ok, err := strconv.ParseBool(reg.UseAsMetaReport)
-				if err != nil {
-					return err
+				useAsReport := true
+				if reg.UseAsMetaReport != "" {
+					var err error
+					useAsReport, err = strconv.ParseBool(reg.UseAsMetaReport)
+					if err != nil {
+						return err
+					}
 				}
-				if ok {
+				if useAsReport {
+					logger.Infof("[metadata-diag] Config: creating metadata report from registry id=%q address=%q namespace(registry)=%q -> report will use namespace=public (align Java)", id, reg.Address, reg.Namespace)
 					opts, err := registryToReportOptions(id, reg)
 					if err != nil {
 						return err
@@ -159,6 +167,7 @@ func (mc *MetadataReportConfig) Init(rc *RootConfig) error {
 					if err = opts.Init(); err != nil {
 						return err
 					}
+					logger.Infof("[metadata-diag] Config: metadata report created for registry id=%q", id)
 				}
 			}
 		}

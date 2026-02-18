@@ -201,6 +201,19 @@ func parseServices(literalServices string) *gxset.HashSet {
 	return set
 }
 
+// firstServiceName returns the first provider application name from services set (for GetMetadataInfo app parameter).
+func firstServiceName(services *gxset.HashSet) string {
+	if services == nil || services.Empty() {
+		return ""
+	}
+	for _, v := range services.Values() {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 func (s *serviceDiscoveryRegistry) GetServiceDiscovery() registry.ServiceDiscovery {
 	return s.serviceDiscovery
 }
@@ -259,11 +272,14 @@ func (s *serviceDiscoveryRegistry) Subscribe(url *common.URL, notify registry.No
 			" either specify 'provided-by' for reference or enable metadata-report center subscription url:%s", url.String())
 	} else {
 		logger.Infof("Find initial mapping applications %q for service %s.", services, url.ServiceKey())
-		// first notify
+		// first notify (mapping listener may skip SubscribeURL when oldServiceNames==newServiceNames, e.g. provided-by already set)
 		err := mappingListener.OnEvent(registry.NewServiceMappingChangedEvent(url.ServiceKey(), services))
 		if err != nil {
 			logger.Errorf("[ServiceDiscoveryRegistry] ServiceInstancesChangedListenerImpl handle error:%v", err)
 		}
+		// Align with Dubbo Java: when using provided-by, OnEvent returns without calling SubscribeURL when oldServiceNames==newServiceNames,
+		// so directory never receives instances. Explicitly run first subscription here.
+		s.SubscribeURL(url, notify, services)
 	}
 	return nil
 }
@@ -278,12 +294,28 @@ func (s *serviceDiscoveryRegistry) SubscribeURL(url *common.URL, notify registry
 	}
 	protocolServiceKey := url.ServiceKey() + ":" + protocol
 	listener := s.serviceListeners[serviceNamesKey]
+	// 诊断：每次 SubscribeURL 进入都打一条，确认调用顺序及是否进入 listener==nil 分支
+	logger.Infof("[service-discovery] SubscribeURL entry: interface=%s protocolServiceKey=%s serviceNamesKey=%q listener_is_nil=%v",
+		url.Interface(), protocolServiceKey, serviceNamesKey, listener == nil)
 	if listener == nil {
-		listener = NewServiceInstancesChangedListener(url.GetParam(constant.ApplicationKey, ""), services)
+		// Use provider app name for metadata lookup (GetAppMetadata(dataId=app, group=revision)); consumer URL's application is wrong here.
+		providerApp := firstServiceName(services)
+		if providerApp == "" {
+			providerApp = url.GetParam(constant.ApplicationKey, "")
+		}
+		listener = NewServiceInstancesChangedListener(providerApp, services)
 		for _, serviceNameTmp := range services.Values() {
 			serviceName := serviceNameTmp.(string)
 			instances := s.serviceDiscovery.GetInstances(serviceName)
-			logger.Infof("Synchronized instance notification on application %s subscription, instance list size %s", serviceName, len(instances))
+			logger.Infof("[service-discovery] GetInstances first call: serviceName=%s len=%d", serviceName, len(instances))
+			// Align with Java: when Nacos client is not ready yet, sync GetInstances may return 0.
+			// Retry so directory gets instances before first RPC (avoids "No provider available").
+			for retry := 0; retry < 5 && len(instances) == 0; retry++ {
+				time.Sleep(300 * time.Millisecond)
+				instances = s.serviceDiscovery.GetInstances(serviceName)
+				logger.Infof("[service-discovery] GetInstances retry %d: serviceName=%s len=%d", retry+1, serviceName, len(instances))
+			}
+			logger.Infof("[service-discovery] Synchronized instance notification on application %s subscription, instance list size %d", serviceName, len(instances))
 			err = listener.OnEvent(&registry.ServiceInstancesChangedEvent{
 				ServiceName: serviceName,
 				Instances:   instances,

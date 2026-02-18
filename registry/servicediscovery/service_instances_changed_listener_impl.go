@@ -102,12 +102,13 @@ func (lstn *ServiceInstancesChangedListenerImpl) OnEvent(e observer.Event) error
 	for _, instances := range lstn.allInstances {
 		for _, instance := range instances {
 			if instance.GetMetadata() == nil {
-				logger.Warnf("Instance metadata is nil: %s", instance.GetHost())
+				logger.Warnf("[metadata-diag] Instance metadata is nil: host=%s", instance.GetHost())
 				continue
 			}
 			revision := instance.GetMetadata()[constant.ExportedServicesRevisionPropertyName]
+			logger.Infof("[metadata-diag] Instance: host=%s app=%s revision=%q (from ExportedServicesRevisionPropertyName)", instance.GetHost(), lstn.app, revision)
 			if revision == "0" {
-				logger.Infof("Find instance without valid service metadata: %s", instance.GetHost())
+				logger.Infof("[metadata-diag] Skip instance (revision=0): %s", instance.GetHost())
 				continue
 			}
 			subInstances := revisionToInstances[revision]
@@ -117,12 +118,11 @@ func (lstn *ServiceInstancesChangedListenerImpl) OnEvent(e observer.Event) error
 			revisionToInstances[revision] = append(subInstances, instance)
 			metadataInfo := lstn.revisionToMetadata[revision]
 			if metadataInfo == nil {
+				logger.Infof("[metadata-diag] GetMetadataInfo: app=%s host=%s revision=%q", lstn.app, instance.GetHost(), revision)
 				meta, err := GetMetadataInfo(lstn.app, instance, revision)
 				if err != nil {
-					// Skip this instance if metadata fetch fails (e.g., old Java Dubbo version)
-					// Try next instance with same revision
-					logger.Warnf("Failed to get metadata from instance %s (revision %s): %v, skipping this instance",
-						instance.GetHost(), revision, err)
+					// Align Java: no fallback. When app-level metadata is missing, consumer uses interface-level invokers (APPLICATION_FIRST dual subscription).
+					logger.Warnf("[metadata-diag] GetMetadataInfo failed: host=%s revision=%q err=%v", instance.GetHost(), revision, err)
 					continue
 				}
 				metadataInfo = meta
@@ -163,6 +163,13 @@ func (lstn *ServiceInstancesChangedListenerImpl) OnEvent(e observer.Event) error
 				}
 				revisionsToUrls[revisions] = urls
 				newServiceURLs[serviceInfo.GetMatchKey()] = urls
+				// [port-diag] log first URL per serviceKey to trace final invoker address
+				if len(urls) > 0 {
+					u := urls[0]
+					// common.URL has Ip, Port, Address(); no Host field
+					logger.Infof("[port-diag] listener built URLs: serviceKey=%s count=%d first_url=%s (ip=%s port=%s)",
+						serviceInfo.GetMatchKey(), len(urls), u.String(), u.Ip, u.Port)
+				}
 			}
 		}
 	}
@@ -229,7 +236,17 @@ func GetMetadataInfo(app string, instance registry.ServiceInstance, revision str
 		initCache(app)
 	})
 	if metadataInfo, ok := metaCache.Get(revision); ok {
-		return metadataInfo.(*info.MetadataInfo), nil
+		meta := metadataInfo.(*info.MetadataInfo)
+		logger.Infof("[metadata-diag] GetMetadataInfo: cache hit app=%s revision=%q services_count=%d", app, revision, len(meta.Services))
+		for name, svc := range meta.Services {
+			urlPort := ""
+			if svc.URL != nil {
+				urlPort = svc.URL.Port
+			}
+			logger.Infof("[metadata-diag] GetMetadataInfo: cached ServiceInfo name=%s port=%d url_nil=%v url_port=%s",
+				name, svc.Port, svc.URL == nil, urlPort)
+		}
+		return meta, nil
 	}
 
 	var metadataStorageType string
@@ -240,16 +257,46 @@ func GetMetadataInfo(app string, instance registry.ServiceInstance, revision str
 	} else {
 		metadataStorageType = instance.GetMetadata()[constant.MetadataStorageTypePropertyName]
 	}
+	logger.Infof("[metadata-diag] GetMetadataInfo: storageType=%q (remote=%v) app=%s revision=%q", metadataStorageType, metadataStorageType == constant.RemoteMetadataStorageType, app, revision)
 	if metadataStorageType == constant.RemoteMetadataStorageType {
+		logger.Infof("[metadata-diag] GetMetadataInfo: path=GetMetadataFromMetadataReport (storageType=remote)")
 		metadataInfo, err = metadata.GetMetadataFromMetadataReport(revision, instance)
 		if err != nil {
+			logger.Warnf("[metadata-diag] GetMetadataFromMetadataReport failed: %v", err)
 			return nil, err
 		}
+		logger.Infof("[metadata-diag] GetMetadataInfo: GetMetadataFromMetadataReport ok")
 	} else {
+		logger.Infof("[metadata-diag] GetMetadataInfo: path=GetMetadataFromRpc first (fallback to report like Java)")
 		metadataInfo, err = metadata.GetMetadataFromRpc(revision, instance)
+		// Align with Dubbo Java: when metadata-report is configured, use registry (e.g. Nacos) as metadata center.
+		// If Rpc fails (e.g. instance lacks dubbo.metadata-service.url-params), fallback to GetMetadataFromMetadataReport.
 		if err != nil {
-			return nil, err
+			logger.Warnf("[metadata-diag] GetMetadataFromRpc failed: %v", err)
+			report := metadata.GetMetadataReport()
+			logger.Infof("[metadata-diag] GetMetadataInfo: fallback to report (Java behavior): report_is_nil=%v", report == nil)
+			if report != nil {
+				metadataInfo, err = metadata.GetMetadataFromMetadataReport(revision, instance)
+				if err != nil {
+					logger.Warnf("[metadata-diag] GetMetadataFromMetadataReport (fallback) failed: %v", err)
+					return nil, err
+				}
+				logger.Infof("[metadata-diag] GetMetadataInfo: fallback GetMetadataFromMetadataReport ok")
+			} else {
+				return nil, err
+			}
+		} else {
+			logger.Infof("[metadata-diag] GetMetadataInfo: GetMetadataFromRpc ok")
 		}
+	}
+	// [port-diag] log ServiceInfo ports when populating cache (report or RPC path)
+	logger.Infof("[metadata-diag] GetMetadataInfo: storing in cache revision=%q services_count=%d", revision, len(metadataInfo.Services))
+	for name, svc := range metadataInfo.Services {
+		urlPort := ""
+		if svc.URL != nil {
+			urlPort = svc.URL.Port
+		}
+		logger.Infof("[metadata-diag] GetMetadataInfo: stored ServiceInfo name=%s port=%d url_port=%s", name, svc.Port, urlPort)
 	}
 	metaCache.Set(revision, metadataInfo)
 	return metadataInfo, nil
