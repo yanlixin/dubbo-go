@@ -331,14 +331,26 @@ func (s *serviceDiscoveryRegistry) SubscribeURL(url *common.URL, notify registry
 
 	logger.Infof("Start subscribing to registry for applications :%s with a new go routine.", serviceNamesKey)
 	go func() {
-		err = s.serviceDiscovery.AddListener(listener)
+		// Align with Nacos gRPC startup: retry AddListener when client is still STARTING.
+		// nacos-sdk-go v2 uses gRPC; the connection may not be ready when dubbo-go calls
+		// AddListener immediately after config.Load(). Without retry the listener is never
+		// registered and Nacos push notifications are never received (directory_invoker_count=0).
+		maxRetry := 10
+		for i := 0; i < maxRetry; i++ {
+			err = s.serviceDiscovery.AddListener(listener)
+			if err == nil {
+				break
+			}
+			logger.Warnf("[service-discovery] AddListener attempt %d/%d failed, url:%s err:%s", i+1, maxRetry, url.String(), err.Error())
+			time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+		}
 		event.Succ = err != nil
 		event.End = time.Now()
 		event.Attachment[constant.InterfaceKey] = url.Interface()
 		metrics.Publish(event)
 		metrics.Publish(metricsRegistry.NewServerSubscribeEvent(err == nil))
 		if err != nil {
-			logger.Errorf("add instance listener catch error,url:%s err:%s", url.String(), err.Error())
+			logger.Errorf("add instance listener catch error after %d retries, url:%s err:%s", maxRetry, url.String(), err.Error())
 		}
 	}()
 }

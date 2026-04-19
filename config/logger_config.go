@@ -75,6 +75,16 @@ func (l *LoggerConfig) Prefix() string {
 }
 
 func (l *LoggerConfig) Init() error {
+	if logger.GetLogger() != nil {
+		// If the logger has already been set externally (e.g., by the application during startup),
+		// we skip the internal initialization to avoid overwriting the unified logger (like Zap)
+		// with the framework's default low-precision colored logger.
+		// We use type assertion to check if it's the default internal DubboLogger.
+		if _, ok := logger.GetLogger().(*logger.DubboLogger); !ok {
+			return nil
+		}
+	}
+
 	var (
 		log logger.Logger
 		err error

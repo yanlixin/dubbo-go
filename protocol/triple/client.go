@@ -229,6 +229,8 @@ func newClientManager(url *common.URL) (*clientManager, error) {
 				TLSClientConfig: cfg,
 				ReadIdleTimeout: keepAliveInterval,
 				PingTimeout:     keepAliveTimeout,
+				// InitialWindowSize 已从 golang.org/x/net/http2.Transport 移除，现使用包内默认 (4MB)。
+				// 若需与 Java 齐平的 8MB 流控，可考虑 Go 1.24+ 的 net/http.Transport.HTTP2Config。
 			}
 		} else {
 			transport = &http2.Transport{
@@ -238,6 +240,7 @@ func newClientManager(url *common.URL) (*clientManager, error) {
 				AllowHTTP:       true,
 				ReadIdleTimeout: keepAliveInterval,
 				PingTimeout:     keepAliveTimeout,
+				// InitialWindowSize 已从 golang.org/x/net/http2.Transport 移除，现使用包内默认 (4MB)。
 			}
 		}
 	case constant.CallHTTP3:
@@ -378,6 +381,7 @@ func newDualTransport(tlsConfig *tls.Config, keepAliveInterval, keepAliveTimeout
 		TLSClientConfig: tlsConfig,
 		ReadIdleTimeout: keepAliveInterval,
 		PingTimeout:     keepAliveTimeout,
+		// InitialWindowSize 已从 golang.org/x/net/http2.Transport 移除，现使用包内默认 (4MB)。
 	}
 
 	http3Transport := &http3.Transport{

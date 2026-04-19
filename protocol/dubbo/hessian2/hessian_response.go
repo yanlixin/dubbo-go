@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"fmt"
 )
 
 import (
@@ -334,6 +335,7 @@ func ReflectResponse(in any, out any) error {
 
 	outType := outValue.Type().String()
 	if outType == "interface {}" || outType == "*interface {}" {
+		inValue = EnsureMapIfPOJO(inValue)
 		hessian.SetValue(outValue, inValue)
 		return nil
 	}
@@ -393,4 +395,93 @@ func version2Int(ver any) int {
 		return v * 100
 	}
 	return v
+}
+
+// EnsureMapIfPOJO converts a struct or pointer-to-struct into a map[string]interface{}.
+// This is used to normalize SDK registered POJOs into generic maps for easier processing.
+// Added for compatibility with Go consumers that expect map[string]interface{}.
+func EnsureMapIfPOJO(v reflect.Value) reflect.Value {
+	if !v.IsValid() {
+		return v
+	}
+
+	rv := v
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return v
+		}
+		rv = rv.Elem()
+	}
+
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		if rv.Len() == 0 {
+			return v
+		}
+		out := make([]interface{}, rv.Len())
+		changed := false
+		for i := 0; i < rv.Len(); i++ {
+			original := rv.Index(i)
+			normalized := EnsureMapIfPOJO(original)
+			out[i] = normalized.Interface()
+			if normalized != original {
+				changed = true
+			}
+		}
+		if changed {
+			return reflect.ValueOf(out)
+		}
+		return v
+
+	case reflect.Map:
+		out := make(map[string]interface{})
+		changed := false
+		for _, key := range rv.MapKeys() {
+			kStr := fmt.Sprintf("%v", key.Interface())
+			original := rv.MapIndex(key)
+			normalized := EnsureMapIfPOJO(original)
+			out[kStr] = normalized.Interface()
+			if normalized != original {
+				changed = true
+			}
+		}
+		if changed {
+			return reflect.ValueOf(out)
+		}
+		return v
+
+	case reflect.Struct:
+		t := rv.Type()
+		// Check for special types that shouldn't be converted to maps
+		if t.PkgPath() == "github.com/apache/dubbo-go-hessian2/java8_time" {
+			return v
+		}
+		// Skip if it's a known non-POJO struct or something internal
+		if t.Name() == "Time" && t.PkgPath() == "time" {
+			return v
+		}
+
+		m := make(map[string]interface{})
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if f.PkgPath != "" {
+				continue // skip unexported
+			}
+			tag := f.Tag.Get("hessian")
+			if tag == "" || tag == "-" {
+				tag = f.Tag.Get("json")
+				if tag == "" || tag == "-" {
+					// Fallback to camelCase of the field name
+					tag = strings.ToLower(f.Name[:1]) + f.Name[1:]
+				} else {
+					tag = strings.Split(tag, ",")[0]
+				}
+			}
+			m[tag] = EnsureMapIfPOJO(rv.Field(i)).Interface()
+		}
+		return reflect.ValueOf(m)
+
+	default:
+		return v
+	}
 }

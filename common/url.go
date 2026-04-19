@@ -1014,8 +1014,17 @@ func GetCompareURLEqualFunc() CompareURLEqualFunc {
 
 // GetParamDuration get duration if param is invalid or missing default value will return 3s
 func (c *URL) GetParamDuration(s string, d string) time.Duration {
-	if t, err := time.ParseDuration(c.GetParam(s, d)); err == nil {
+	val := c.GetParam(s, d)
+	if t, err := time.ParseDuration(val); err == nil {
 		return t
+	}
+	// Fallback for digit-only strings (Java Dubbo compatibility)
+	if val != "" {
+		if _, err := strconv.Atoi(val); err == nil {
+			if t, err := time.ParseDuration(val + "ms"); err == nil {
+				return t
+			}
+		}
 	}
 	return 3 * time.Second
 }

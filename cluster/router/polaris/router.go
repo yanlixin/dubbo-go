@@ -57,7 +57,14 @@ func newPolarisRouter(url *common.URL) (*polarisRouter, error) {
 	applicationName := url.GetParam(constant.ApplicationKey, "")
 
 	if applicationName == "" {
-		return nil, fmt.Errorf("polaris router must set application name")
+		// Polaris requires an application name. 
+		// If empty, we return a DISABLED router object instead of nil to prevent 
+		// nil pointer dereference panics when the framework calls Route().
+		logger.Warnf("[Router][Polaris] Skipping Polaris router initialization because 'application' name is empty. " +
+			"This is normal if you are only using Nacos/Zookeeper.")
+		return &polarisRouter{
+			openRoute: false,
+		}, nil
 	}
 
 	// get from url attr

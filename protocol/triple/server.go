@@ -306,104 +306,114 @@ func (s *Server) compatRegisterHandler(interfaceName string, svc dubbo3.Dubbo3Gr
 func (s *Server) handleServiceWithInfo(interfaceName string, invoker base.Invoker, info *common.ServiceInfo, opts ...tri.HandlerOption) {
 	for _, method := range info.Methods {
 		m := method
-		procedure := joinProcedure(interfaceName, method.Name)
-		switch m.Type {
-		case constant.CallUnary:
-			_ = s.triServer.RegisterUnaryHandler(
-				procedure,
-				m.ReqInitFunc,
-				func(ctx context.Context, req *tri.Request) (*tri.Response, error) {
-					var args []any
-					if argsRaw, ok := req.Msg.([]any); ok {
-						// non-idl mode, req.Msg consists of many arguments
-						for _, argRaw := range argsRaw {
-							// refer to createServiceInfoWithReflection, in ReqInitFunc, argRaw is a pointer to real arg.
-							// so we have to invoke Elem to get the real arg.
-							args = append(args, reflect.ValueOf(argRaw).Elem().Interface())
+		
+		procedures := []string{joinProcedure(interfaceName, m.Name)}
+		if len(m.Name) > 0 && m.Name[0] >= 'A' && m.Name[0] <= 'Z' {
+			camelProcedure := joinProcedure(interfaceName, strings.ToLower(m.Name[:1]) + m.Name[1:])
+			if camelProcedure != procedures[0] {
+				procedures = append(procedures, camelProcedure)
+			}
+		}
+
+		for _, procedure := range procedures {
+			switch m.Type {
+			case constant.CallUnary:
+				_ = s.triServer.RegisterUnaryHandler(
+					procedure,
+					m.ReqInitFunc,
+					func(ctx context.Context, req *tri.Request) (*tri.Response, error) {
+						var args []any
+						if argsRaw, ok := req.Msg.([]any); ok {
+							// non-idl mode, req.Msg consists of many arguments
+							for _, argRaw := range argsRaw {
+								// refer to createServiceInfoWithReflection, in ReqInitFunc, argRaw is a pointer to real arg.
+								// so we have to invoke Elem to get the real arg.
+								args = append(args, reflect.ValueOf(argRaw).Elem().Interface())
+							}
+						} else {
+							// triple idl mode and old triple idl mode
+							args = append(args, req.Msg)
 						}
-					} else {
-						// triple idl mode and old triple idl mode
-						args = append(args, req.Msg)
-					}
-					attachments := generateAttachments(req.Header())
-					// inject attachments
-					ctx = context.WithValue(ctx, constant.AttachmentKey, attachments)
-					invo := invocation.NewRPCInvocation(m.Name, args, attachments)
-					res := invoker.Invoke(ctx, invo)
-					// todo(DMwangnima): modify InfoInvoker to get a unified processing logic
-					// please refer to server/InfoInvoker.Invoke()
-					var triResp *tri.Response
-					if existingResp, ok := res.Result().(*tri.Response); ok {
-						triResp = existingResp
-					} else {
-						// please refer to proxy/proxy_factory/ProxyInvoker.Invoke
-						triResp = tri.NewResponse([]any{res.Result()})
-					}
-					for k, v := range res.Attachments() {
-						switch val := v.(type) {
-						case string:
-							tri.AppendToOutgoingContext(ctx, k, val)
-						case []string:
-							for _, v := range val {
-								tri.AppendToOutgoingContext(ctx, k, v)
+						attachments := generateAttachments(req.Header())
+						// inject attachments
+						ctx = context.WithValue(ctx, constant.AttachmentKey, attachments)
+						invo := invocation.NewRPCInvocation(m.Name, args, attachments)
+						res := invoker.Invoke(ctx, invo)
+						// todo(DMwangnima): modify InfoInvoker to get a unified processing logic
+						// please refer to server/InfoInvoker.Invoke()
+						var triResp *tri.Response
+						if existingResp, ok := res.Result().(*tri.Response); ok {
+							triResp = existingResp
+						} else {
+							// please refer to proxy/proxy_factory/ProxyInvoker.Invoke
+							triResp = tri.NewResponse([]any{res.Result()})
+						}
+						for k, v := range res.Attachments() {
+							switch val := v.(type) {
+							case string:
+								tri.AppendToOutgoingContext(ctx, k, val)
+							case []string:
+								for _, v := range val {
+									tri.AppendToOutgoingContext(ctx, k, v)
+								}
 							}
 						}
-					}
-					return triResp, res.Error()
-				},
-				opts...,
-			)
-		case constant.CallClientStream:
-			_ = s.triServer.RegisterClientStreamHandler(
-				procedure,
-				func(ctx context.Context, stream *tri.ClientStream) (*tri.Response, error) {
-					var args []any
-					args = append(args, m.StreamInitFunc(stream))
-					attachments := generateAttachments(stream.RequestHeader())
-					// inject attachments
-					ctx = context.WithValue(ctx, constant.AttachmentKey, attachments)
-					invo := invocation.NewRPCInvocation(m.Name, args, attachments)
-					res := invoker.Invoke(ctx, invo)
-					if triResp, ok := res.Result().(*tri.Response); ok {
 						return triResp, res.Error()
-					}
-					// please refer to proxy/proxy_factory/ProxyInvoker.Invoke
-					triResp := tri.NewResponse([]any{res.Result()})
-					return triResp, res.Error()
-				},
-				opts...,
-			)
-		case constant.CallServerStream:
-			_ = s.triServer.RegisterServerStreamHandler(
-				procedure,
-				m.ReqInitFunc,
-				func(ctx context.Context, req *tri.Request, stream *tri.ServerStream) error {
-					var args []any
-					args = append(args, req.Msg, m.StreamInitFunc(stream))
-					attachments := generateAttachments(req.Header())
-					// inject attachments
-					ctx = context.WithValue(ctx, constant.AttachmentKey, attachments)
-					invo := invocation.NewRPCInvocation(m.Name, args, attachments)
-					res := invoker.Invoke(ctx, invo)
-					return res.Error()
-				},
-				opts...,
-			)
-		case constant.CallBidiStream:
-			_ = s.triServer.RegisterBidiStreamHandler(
-				procedure,
-				func(ctx context.Context, stream *tri.BidiStream) error {
-					var args []any
-					args = append(args, m.StreamInitFunc(stream))
-					attachments := generateAttachments(stream.RequestHeader())
-					// inject attachments
-					ctx = context.WithValue(ctx, constant.AttachmentKey, attachments)
-					invo := invocation.NewRPCInvocation(m.Name, args, attachments)
-					res := invoker.Invoke(ctx, invo)
-					return res.Error()
-				},
-				opts...,
-			)
+					},
+					opts...,
+				)
+			case constant.CallClientStream:
+				_ = s.triServer.RegisterClientStreamHandler(
+					procedure,
+					func(ctx context.Context, stream *tri.ClientStream) (*tri.Response, error) {
+						var args []any
+						args = append(args, m.StreamInitFunc(stream))
+						attachments := generateAttachments(stream.RequestHeader())
+						// inject attachments
+						ctx = context.WithValue(ctx, constant.AttachmentKey, attachments)
+						invo := invocation.NewRPCInvocation(m.Name, args, attachments)
+						res := invoker.Invoke(ctx, invo)
+						if triResp, ok := res.Result().(*tri.Response); ok {
+							return triResp, res.Error()
+						}
+						// please refer to proxy/proxy_factory/ProxyInvoker.Invoke
+						triResp := tri.NewResponse([]any{res.Result()})
+						return triResp, res.Error()
+					},
+					opts...,
+				)
+			case constant.CallServerStream:
+				_ = s.triServer.RegisterServerStreamHandler(
+					procedure,
+					m.ReqInitFunc,
+					func(ctx context.Context, req *tri.Request, stream *tri.ServerStream) error {
+						var args []any
+						args = append(args, req.Msg, m.StreamInitFunc(stream))
+						attachments := generateAttachments(req.Header())
+						// inject attachments
+						ctx = context.WithValue(ctx, constant.AttachmentKey, attachments)
+						invo := invocation.NewRPCInvocation(m.Name, args, attachments)
+						res := invoker.Invoke(ctx, invo)
+						return res.Error()
+					},
+					opts...,
+				)
+			case constant.CallBidiStream:
+				_ = s.triServer.RegisterBidiStreamHandler(
+					procedure,
+					func(ctx context.Context, stream *tri.BidiStream) error {
+						var args []any
+						args = append(args, m.StreamInitFunc(stream))
+						attachments := generateAttachments(stream.RequestHeader())
+						// inject attachments
+						ctx = context.WithValue(ctx, constant.AttachmentKey, attachments)
+						invo := invocation.NewRPCInvocation(m.Name, args, attachments)
+						res := invoker.Invoke(ctx, invo)
+						return res.Error()
+					},
+					opts...,
+				)
+			}
 		}
 	}
 }
@@ -527,6 +537,14 @@ func createServiceInfoWithReflection(svc common.RPCService) *common.ServiceInfo 
 			},
 		}
 		methodInfos = append(methodInfos, methodInfo)
+
+		// Add camelCase alias for Java interoperability
+		if len(methodType.Name) > 0 && methodType.Name[0] >= 'A' && methodType.Name[0] <= 'Z' {
+			camelName := strings.ToLower(methodType.Name[:1]) + methodType.Name[1:]
+			camelMethodInfo := methodInfo
+			camelMethodInfo.Name = camelName
+			methodInfos = append(methodInfos, camelMethodInfo)
+		}
 	}
 
 	// only support no-idl mod call unary
