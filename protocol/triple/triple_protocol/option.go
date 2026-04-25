@@ -178,6 +178,11 @@ func WithRequireTripleProtocolHeader() HandlerOption {
 	return &requireTripleProtocolHeaderOption{}
 }
 
+// WithCORS configures CORS for the handler.
+func WithCORS(cors *CorsConfig) HandlerOption {
+	return &corsOption{cors: cors}
+}
+
 func WithGroup(group string) Option {
 	return &groupOption{group}
 }
@@ -186,8 +191,12 @@ func WithVersion(version string) Option {
 	return &versionOption{version}
 }
 
+// WithExpectedCodecName sets a fallback codec for the server handler.
+// When the primary codec (from client's Content-Type) fails to unmarshal
+// the request, the server will attempt to use this fallback codec.
+// This enhances interoperability, especially with Java clients.
 func WithExpectedCodecName(ExpectedCodecName string) Option {
-	return &ExpectedCodecNameOption{ExpectedCodecName: ExpectedCodecName}
+	return &FallbackCodecNameOption{FallbackCodecName: ExpectedCodecName}
 }
 
 // Option implements both [ClientOption] and [HandlerOption], so it can be
@@ -439,6 +448,17 @@ func (o *requireTripleProtocolHeaderOption) applyToHandler(config *handlerConfig
 	config.RequireTripleProtocolHeader = true
 }
 
+type corsOption struct {
+	cors *CorsConfig
+}
+
+func (o *corsOption) applyToHandler(config *handlerConfig) {
+	if o.cors == nil {
+		return
+	}
+	config.Cors = o.cors
+}
+
 type groupOption struct {
 	Group string
 }
@@ -475,16 +495,16 @@ func (o *idempotencyOption) applyToHandler(config *handlerConfig) {
 	config.IdempotencyLevel = o.idempotencyLevel
 }
 
-type ExpectedCodecNameOption struct {
-	ExpectedCodecName string
+type FallbackCodecNameOption struct {
+	FallbackCodecName string
 }
 
-func (o *ExpectedCodecNameOption) applyToClient(config *clientConfig) {
-	//Do nothing as client doesn't have codec issues
+func (o *FallbackCodecNameOption) applyToClient(config *clientConfig) {
+	// Do nothing as client doesn't have codec fallback issues
 }
 
-func (o *ExpectedCodecNameOption) applyToHandler(config *handlerConfig) {
-	config.ExpectedCodecName = o.ExpectedCodecName
+func (o *FallbackCodecNameOption) applyToHandler(config *handlerConfig) {
+	config.FallbackCodecName = o.FallbackCodecName
 }
 
 type tripleOption struct{}

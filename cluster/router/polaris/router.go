@@ -23,22 +23,18 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
 
-import (
 	"github.com/dubbogo/gost/log/logger"
-
 	"github.com/polarismesh/polaris-go"
 	"github.com/polarismesh/polaris-go/pkg/model"
-	v1 "github.com/polarismesh/polaris-go/pkg/model/pb/v1"
-)
 
-import (
 	"dubbo.apache.org/dubbo-go/v3/cluster/router"
 	"dubbo.apache.org/dubbo-go/v3/common"
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
 	"dubbo.apache.org/dubbo-go/v3/global"
 	"dubbo.apache.org/dubbo-go/v3/protocol/base"
+	v1 "github.com/polarismesh/polaris-go/pkg/model/pb/v1"
+
 	remotingpolaris "dubbo.apache.org/dubbo-go/v3/remoting/polaris"
 	"dubbo.apache.org/dubbo-go/v3/remoting/polaris/parser"
 )
@@ -53,18 +49,13 @@ var (
 
 func newPolarisRouter(url *common.URL) (*polarisRouter, error) {
 
-	// get from url param
+	// get application name from url param
 	applicationName := url.GetParam(constant.ApplicationKey, "")
-
 	if applicationName == "" {
-		// Polaris requires an application name. 
-		// If empty, we return a DISABLED router object instead of nil to prevent 
-		// nil pointer dereference panics when the framework calls Route().
-		logger.Warnf("[Router][Polaris] Skipping Polaris router initialization because 'application' name is empty. " +
-			"This is normal if you are only using Nacos/Zookeeper.")
-		return &polarisRouter{
-			openRoute: false,
-		}, nil
+		applicationName = url.SubURL.GetParam(constant.ApplicationKey, "")
+		if applicationName == "" {
+			return nil, fmt.Errorf("polaris router must set application name")
+		}
 	}
 
 	// get from url attr

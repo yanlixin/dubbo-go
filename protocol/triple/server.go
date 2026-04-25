@@ -25,21 +25,10 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-)
 
-import (
 	hessian "github.com/apache/dubbo-go-hessian2"
-
 	"github.com/dubbogo/gost/log/logger"
 
-	grpc_go "github.com/dubbogo/grpc-go"
-
-	"github.com/dustin/go-humanize"
-
-	"google.golang.org/grpc"
-)
-
-import (
 	"dubbo.apache.org/dubbo-go/v3/common"
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
 	"dubbo.apache.org/dubbo-go/v3/config"
@@ -48,7 +37,12 @@ import (
 	"dubbo.apache.org/dubbo-go/v3/protocol/base"
 	"dubbo.apache.org/dubbo-go/v3/protocol/dubbo3"
 	"dubbo.apache.org/dubbo-go/v3/protocol/invocation"
+	grpc_go "github.com/dubbogo/grpc-go"
+	"github.com/dustin/go-humanize"
+	"google.golang.org/grpc"
+
 	tri "dubbo.apache.org/dubbo-go/v3/protocol/triple/triple_protocol"
+
 	dubbotls "dubbo.apache.org/dubbo-go/v3/tls"
 )
 
@@ -233,6 +227,18 @@ func getHanOpts(url *common.URL, tripleConf *global.TripleConfig) (hanOpts []tri
 
 	// todo:// open tracing
 
+	// CORS configuration
+	if tripleConf.Cors != nil && len(tripleConf.Cors.AllowOrigins) > 0 {
+		hanOpts = append(hanOpts, tri.WithCORS(&tri.CorsConfig{
+			AllowOrigins:     tripleConf.Cors.AllowOrigins,
+			AllowMethods:     tripleConf.Cors.AllowMethods,
+			AllowHeaders:     tripleConf.Cors.AllowHeaders,
+			ExposeHeaders:    tripleConf.Cors.ExposeHeaders,
+			AllowCredentials: tripleConf.Cors.AllowCredentials,
+			MaxAge:           tripleConf.Cors.MaxAge,
+		}))
+	}
+
 	return hanOpts
 }
 
@@ -306,10 +312,10 @@ func (s *Server) compatRegisterHandler(interfaceName string, svc dubbo3.Dubbo3Gr
 func (s *Server) handleServiceWithInfo(interfaceName string, invoker base.Invoker, info *common.ServiceInfo, opts ...tri.HandlerOption) {
 	for _, method := range info.Methods {
 		m := method
-		
+
 		procedures := []string{joinProcedure(interfaceName, m.Name)}
 		if len(m.Name) > 0 && m.Name[0] >= 'A' && m.Name[0] <= 'Z' {
-			camelProcedure := joinProcedure(interfaceName, strings.ToLower(m.Name[:1]) + m.Name[1:])
+			camelProcedure := joinProcedure(interfaceName, strings.ToLower(m.Name[:1])+m.Name[1:])
 			if camelProcedure != procedures[0] {
 				procedures = append(procedures, camelProcedure)
 			}
@@ -513,59 +519,101 @@ func createServiceInfoWithReflection(svc common.RPCService) *common.ServiceInfo 
 		if methodType.Name == "Reference" {
 			continue
 		}
-		paramsNum := methodType.Type.NumIn()
-		// the first param is receiver itself, the second param is ctx
-		// just ignore them
-		if paramsNum < 2 {
-			logger.Fatalf("TRIPLE does not support %s method that does not have any parameter", methodType.Name)
-			continue
-		}
-		paramsTypes := make([]reflect.Type, paramsNum-2)
-		for j := 2; j < paramsNum; j++ {
-			paramsTypes[j-2] = methodType.Type.In(j)
-		}
-		methodInfo := common.MethodInfo{
-			Name: methodType.Name,
-			// only support Unary invocation now
-			Type: constant.CallUnary,
-			ReqInitFunc: func() any {
-				params := make([]any, len(paramsTypes))
-				for k, paramType := range paramsTypes {
-					params[k] = reflect.New(paramType).Interface()
-				}
-				return params
-			},
-		}
-		methodInfos = append(methodInfos, methodInfo)
-
-		// Add camelCase alias for Java interoperability
-		if len(methodType.Name) > 0 && methodType.Name[0] >= 'A' && methodType.Name[0] <= 'Z' {
-			camelName := strings.ToLower(methodType.Name[:1]) + methodType.Name[1:]
-			camelMethodInfo := methodInfo
-			camelMethodInfo.Name = camelName
-			methodInfos = append(methodInfos, camelMethodInfo)
+		methodInfo := buildMethodInfoWithReflection(methodType)
+		if methodInfo != nil {
+			methodInfos = append(methodInfos, *methodInfo)
 		}
 	}
 
-	// only support no-idl mod call unary
-	genericMethodInfo := common.MethodInfo{
-		Name: "$invoke",
-		Type: constant.CallUnary,
-		ReqInitFunc: func() any {
-			params := make([]any, 3)
-			// params must be pointer
-			params[0] = func(s string) *string { return &s }("methodName") // methodName *string
-			params[1] = &[]string{}                                        // argv type  *[]string
-			params[2] = &[]hessian.Object{}                                // argv       *[]hessian.Object
-			return params
-		},
-	}
-
-	methodInfos = append(methodInfos, genericMethodInfo)
+	// Add $invoke method for generic call support
+	methodInfos = append(methodInfos, buildGenericMethodInfo())
 
 	info.Methods = methodInfos
-
 	return &info
+}
+
+// buildMethodInfoWithReflection creates MethodInfo for a single method using reflection.
+func buildMethodInfoWithReflection(methodType reflect.Method) *common.MethodInfo {
+	paramsNum := methodType.Type.NumIn()
+	// the first param is receiver itself, the second param is ctx
+	if paramsNum < 2 {
+		logger.Fatalf("TRIPLE does not support %s method that does not have any parameter", methodType.Name)
+		return nil
+	}
+
+	// Extract parameter types (skip receiver and context)
+	paramsTypes := make([]reflect.Type, paramsNum-2)
+	for j := 2; j < paramsNum; j++ {
+		paramsTypes[j-2] = methodType.Type.In(j)
+	}
+
+	// Capture method for closure
+	method := methodType
+	return &common.MethodInfo{
+		Name: methodType.Name,
+		Type: constant.CallUnary, // only support Unary invocation now
+		ReqInitFunc: func() any {
+			params := make([]any, len(paramsTypes))
+			for k, paramType := range paramsTypes {
+				params[k] = reflect.New(paramType).Interface()
+			}
+			return params
+		},
+		MethodFunc: func(ctx context.Context, args []any, handler any) (any, error) {
+			in := []reflect.Value{reflect.ValueOf(handler)}
+			in = append(in, reflect.ValueOf(ctx))
+			for _, arg := range args {
+				in = append(in, reflect.ValueOf(arg))
+			}
+			returnValues := method.Func.Call(in)
+			if len(returnValues) == 1 {
+				if isReflectValueNil(returnValues[0]) {
+					return nil, nil
+				}
+				if err, ok := returnValues[0].Interface().(error); ok {
+					return nil, err
+				}
+				return nil, nil
+			}
+			var result any
+			var err error
+			if !isReflectValueNil(returnValues[0]) {
+				result = returnValues[0].Interface()
+			}
+			if len(returnValues) > 1 && !isReflectValueNil(returnValues[1]) {
+				if e, ok := returnValues[1].Interface().(error); ok {
+					err = e
+				}
+			}
+			return result, err
+		},
+	}
+}
+
+// buildGenericMethodInfo creates MethodInfo for $invoke generic call method.
+func buildGenericMethodInfo() common.MethodInfo {
+	return common.MethodInfo{
+		Name: constant.Generic,
+		Type: constant.CallUnary,
+		ReqInitFunc: func() any {
+			return []any{
+				func(s string) *string { return &s }(""), // methodName *string
+				&[]string{},                              // types *[]string
+				&[]hessian.Object{},                      // args *[]hessian.Object
+			}
+		},
+	}
+}
+
+// isReflectValueNil safely checks if a reflect.Value is nil.
+// It first checks if the value's kind supports nil checking to avoid panic.
+func isReflectValueNil(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // generateAttachments transfer http.Header to map[string]any and make all keys lowercase
